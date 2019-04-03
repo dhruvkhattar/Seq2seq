@@ -45,20 +45,18 @@ class data_handler():
         source_vocab_freq = defaultdict(int)
         target_vocab_freq = defaultdict(int)
 
-        self.df = pd.read_csv(self.filename).sample(100000)
+        self.df = pd.read_csv(self.filename).sample(2000000)
         self.body = self.df['body'].tolist()
         self.titles = self.df['issue_title'].tolist()
 
         for i in tqdm(range(len(self.body))):
-            source_text = self.body[i]
-            target_text = '<s>' + self.titles[i] + '</s>'
+            source_text = self.process_text(self.body[i])
+            target_text = ['<s>'] + self.process_text(self.titles[i]) + ['</s>']
             
-            tokens = self.process_text(source_text)
-            for token in tokens:
+            for token in source_text:
                 source_vocab_freq[token] += 1
             
-            tokens = self.process_text(target_text)
-            for token in tokens:
+            for token in target_text:
                 target_vocab_freq[token] += 1
 
         vocab_sorted = Counter(source_vocab_freq)
@@ -78,11 +76,11 @@ class data_handler():
         decoder_vecs = []
         output_vecs = []
         for i in tqdm(range(len(self.body))):
-            source_text = self.body[i]
-            target_text = '<s>' + self.titles[i] + '</s>'
+            source_text = self.process_text(self.body[i])
+            target_text = ['<s>'] + self.process_text(self.titles[i]) + ['</s>']
                 
             vec = []
-            tokens = source_text.split()[:self.max_encoder_len]
+            tokens = source_text[:self.max_encoder_len]
             seq_len = len(tokens)
             for i in range(self.max_encoder_len - seq_len):
                 vec.append(0)
@@ -95,14 +93,18 @@ class data_handler():
             
             vec = []
             vec2 = []
-            tokens = target_text.split()[:self.max_decoder_len]
+            tokens = target_text[:self.max_decoder_len]
+            t = 0
             for token in tokens:
                 if token in self.target_vocab:
                     vec.append(self.target_vocab[token])
-                    vec2.append(self.target_vocab[token])
+                    if t > 0:
+                        vec2.append(self.target_vocab[token])
                 else:
                     vec.append(self.target_vocab['OOV'])
-                    vec2.append(self.target_vocab['OOV'])
+                    if t > 0:
+                        vec2.append(self.target_vocab['OOV'])
+                t += 1
             for i in range(self.max_decoder_len - len(vec)):
                 vec.append(0)
             for i in range(self.max_decoder_len - len(vec2)):
@@ -122,5 +124,5 @@ class data_handler():
 
 if __name__ == '__main__':
 
-    d = data_handler('data/github_issues.csv', 10000, 7000, 75, 12)
+    d = data_handler('data/github_issues.csv', 10000, 7000, 70, 12)
     d.load_data()
