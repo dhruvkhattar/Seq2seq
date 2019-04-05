@@ -1,10 +1,10 @@
 import pdb
 import numpy as np
 import keras
-from tensorflow.python.keras.models import Model, load_model
-from tensorflow.python.keras.layers import Dropout, TimeDistributed, Concatenate, GRU, Input, Bidirectional, Embedding, Dense, LSTM, BatchNormalization
-from tensorflow.python.keras import optimizers
-from tensorflow.python.keras.callbacks import ModelCheckpoint, TensorBoard
+from keras.models import Model, load_model
+from keras.layers import GRU, Input, LSTM, Bidirectional, Embedding, Dense, BatchNormalization
+from keras import optimizers
+from keras.callbacks import ModelCheckpoint, TensorBoard
 import pickle as pkl
 import string
 import re
@@ -12,7 +12,7 @@ from textacy.preprocess import preprocess_text
 from keras.preprocessing.text import text_to_word_sequence
 import os
 import dill as dpickle
-from attention import AttentionLayer
+
 
 class Seq2seq():
 
@@ -21,7 +21,7 @@ class Seq2seq():
 
         self.latent_dim = latent_dim
         self.encoder_len = encoder_len
-        self.decoder_len = decoder_len - 1
+        self.decoder_len = decoder_len
         self.body_pp = dpickle.load(open('data/body_pp.dpkl', 'rb'))
         self.title_pp = dpickle.load(open('data/title_pp.dpkl', 'rb'))
         self.source_vocab_size = max(self.body_pp.id2token.keys())+1
@@ -35,29 +35,26 @@ class Seq2seq():
     
     def create_model(self):
 
-        encoder_inputs = Input(batch_shape=(1000, self.encoder_len), name='Encoder-Input')
+        encoder_inputs = Input(shape=(None, ), name='Encoder-Input')
         encoder_embed = Embedding(self.source_vocab_size, self.latent_dim, name='Encoder-Embed')(encoder_inputs)
         encoder_norm = BatchNormalization(name='Encoder-Batchnorm')(encoder_embed)
-        encoder_lstm = LSTM(self.latent_dim, return_sequences=True, return_state=True, name='Encoder-LSTM')
+        encoder_lstm = LSTM(self.latent_dim, return_state=True, name='Encoder-LSTM')
         encoder_output, state_h, state_c = encoder_lstm(encoder_norm)
+
         encoder_states = [state_h, state_c]
 
-        decoder_inputs = Input(batch_shape=(1000, self.decoder_len,), name='Decoder-Input')
+        decoder_inputs = Input(shape=(None, ), name='Decoder-Input')
         decoder_embed_func = Embedding(self.target_vocab_size, self.latent_dim, name='Decoder-Embed')
         decoder_embed = decoder_embed_func(decoder_inputs)
         decoder_norm = BatchNormalization(name='Decoder-Batchnorm')(decoder_embed)
         decoder_lstm = LSTM(self.latent_dim, return_sequences=True, return_state=True, name='Decoder-LSTM')
         decoder_lstm_output, _, _ = decoder_lstm(decoder_norm, initial_state=encoder_states)
-        
-        attn_layer = AttentionLayer(name='Attention')
-        attn_output, attn_states = attn_layer([encoder_output, decoder_lstm_output])
-        
-        decoder_concat = Concatenate(axis=-1, name='concat_layer')([decoder_lstm_output, attn_output])
-        decoder_norm2 = BatchNormalization(name='Decoder-Batchnorm2')(decoder_concat)
+        decoder_norm2 = BatchNormalization(name='Decoder-Batchnorm2')(decoder_lstm_output)
         decoder_dense = Dense(self.target_vocab_size, activation='softmax', name='Decoder-Dense')
         decoder_outputs = decoder_dense(decoder_norm2)
 
         self.model = Model([encoder_inputs, decoder_inputs], decoder_outputs)
+        
         self.model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
         print(self.model.summary())
 
@@ -75,15 +72,14 @@ class Seq2seq():
     def decode_sequence(self, input_seq):
 
         input_vec = self.body_pp.transform([input_seq])
-        encoder_out, h, c = self.encoder_model.predict(input_vec)
-        states_value = [h, c]
+        states_value = self.encoder_model.predict(input_vec)
 
         target_sequence = np.array(self.title_pp.token2id['_start_']).reshape(1, 1)
 
         stop_condition = False
         decoded_sentence = []
         while not stop_condition:
-            output_token, h, c = self.decoder_model.predict([encoder_out, target_sequence] + states_value)
+            output_token, h, c = self.decoder_model.predict([target_sequence] + states_value)
 
             pred_idx = np.argmax(output_token[0, -1, 2:]) + 2
             sampled_token = self.title_pp.id2token[pred_idx]
@@ -102,45 +98,34 @@ class Seq2seq():
 
     def load_models(self, path):
 
-        self.model = load_model(path+'/model.h5', custom_objects={'AttentionLayer': AttentionLayer})
+        self.model = load_model(path+'/model.h5')
 
-        encoder_inputs = Input(batch_shape=(1, self.encoder_len))
-        encoder_embed_func = self.model.get_layer('Encoder-Embed')
-        encoder_embed = encoder_embed_func(encoder_inputs)
-        encoder_norm = self.model.get_layer('Encoder-Batchnorm')
-        encoder_bn = encoder_norm(encoder_embed)
-        encoder_outputs, state_h_enc, state_c_enc = self.model.get_layer('Encoder-LSTM')(encoder_bn)
+        encoder_inputs = self.model.get_layer('Encoder-Input').input
+        encoder_outputs, state_h_enc, state_c_enc = self.model.get_layer('Encoder-LSTM').output
         encoder_states = [state_h_enc, state_c_enc]
-        self.encoder_model = Model(encoder_inputs, [encoder_outputs] + encoder_states)
+        self.encoder_model = Model(encoder_inputs, encoder_states)
 
-        decoder_inputs = Input(batch_shape=(1, 1))
-        decoder_state_input_h = Input(batch_shape=(1, self.latent_dim))
-        decoder_state_input_c = Input(batch_shape=(1, self.latent_dim))
-        encoder_output_input = Input(batch_shape=(1, self.encoder_len, self.latent_dim))
+        decoder_inputs = self.model.get_layer('Decoder-Input').input
+        decoder_state_input_h = Input(shape=(self.latent_dim, ))
+        decoder_state_input_c = Input(shape=(self.latent_dim, ))
         decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
         decoder_lstm = self.model.get_layer('Decoder-LSTM')
         decoder_embed_func = self.model.get_layer('Decoder-Embed')
         decoder_embed = decoder_embed_func(decoder_inputs)
         decoder_norm1 = self.model.get_layer('Decoder-Batchnorm')
         decoder_bn = decoder_norm1(decoder_embed)
-        decoder_lstm_output, state_h_dec, state_c_dec = decoder_lstm(decoder_bn, initial_state=decoder_states_inputs)
+        decoder_outputs, state_h_dec, state_c_dec = decoder_lstm(decoder_bn, initial_state=decoder_states_inputs)
         decoder_states = [state_h_dec, state_c_dec]
-        
-        attn = self.model.get_layer('Attention')
-        attn_output, attn_states = attn([encoder_output_input, decoder_lstm_output])
-        
-        concat_layer = self.model.get_layer('concat_layer')
-        concat_output = concat_layer([decoder_lstm_output, attn_output])
         decoder_norm2 = self.model.get_layer('Decoder-Batchnorm2')
-        decoder_bn2 = decoder_norm2(concat_output)
         decoder_dense = self.model.get_layer('Decoder-Dense')
+        decoder_bn2 = decoder_norm2(decoder_outputs)
         decoder_outputs = decoder_dense(decoder_bn2)
-        self.decoder_model = Model([encoder_output_input, decoder_inputs] + decoder_states_inputs, [decoder_outputs] + decoder_states)
+        self.decoder_model = Model([decoder_inputs] + decoder_states_inputs, [decoder_outputs] + decoder_states)
     
     
 if __name__ == '__main__':
 
-    path = 'ckpt-att'
+    path = 'ckpt'
     s = Seq2seq(300, 70, 12)
     s.create_model()
     s.train(1000, 10, path)
